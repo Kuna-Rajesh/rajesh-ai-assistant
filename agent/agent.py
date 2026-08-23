@@ -178,7 +178,24 @@ async def entrypoint(ctx: JobContext) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Prewarm & Entry point
 # ---------------------------------------------------------------------------
+def prewarm(proc: JobProcess) -> None:
+    port = os.environ.get("PORT")
+    if port:
+        import uvicorn
+        from agent.token_server import app as token_app
+        logger.info(f"Starting embedded token server on port {port}...")
+        config = uvicorn.Config(token_app, host="0.0.0.0", port=int(port), log_level="info")
+        server = uvicorn.Server(config)
+        asyncio.create_task(server.serve())
+
+
 if __name__ == "__main__":
-    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, agent_name="rajesh-agent"))
+    cli.run_app(
+        WorkerOptions(
+            entrypoint_fnc=entrypoint,
+            prewarm_fnc=prewarm,
+            agent_name="rajesh-agent",
+        )
+    )
