@@ -8,10 +8,16 @@ Env:  ../.env  (LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET,
 """
 from __future__ import annotations
 
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 import asyncio
 import json
 import logging
-import os
 from pathlib import Path
 
 logger = logging.getLogger("rajesh-agent")
@@ -27,6 +33,7 @@ from livekit.agents import (
     Agent,
     AgentSession,
     JobContext,
+    JobExecutorType,
     WorkerOptions,
     cli,
 )
@@ -197,5 +204,7 @@ if __name__ == "__main__":
             entrypoint_fnc=entrypoint,
             prewarm_fnc=prewarm,
             agent_name="rajesh-agent",
+            num_idle_processes=0,
+            job_executor_type=JobExecutorType.THREAD,
         )
     )
