@@ -1,0 +1,13 @@
+services:
+  livekit:
+    image: livekit/livekit-server:latest
+    # Use explicit config instead of --dev so we can set bind_addresses: 0.0.0.0
+    # --dev binds to 127.0.0.1 inside the container, which breaks Docker port-forwarding
+    command: --config /etc/livekit.yaml
+    ports:
+      - "7880:7880"       # HTTP/WebSocket signaling
+      - "7881:7881"       # RTC over TCP
+      - "7882-7900:7882-7900/udp"   # RTC over UDP (audio media)
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    restart: unless-stopped

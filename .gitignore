@@ -1,0 +1,31 @@
+# Environment & Secrets (NEVER COMMIT!)
+.env
+*.env
+!.env.example
+*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+agent/venv/
+venv/
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Node / Frontend
+frontend/node_modules/
+node_modules/
+frontend/dist/
+dist/
+.next/
+.out/
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.log

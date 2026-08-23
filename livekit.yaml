@@ -1,0 +1,26 @@
+# LiveKit Server config for local development
+# Replaces the --dev flag so we can force bind to 0.0.0.0
+# (--dev binds to 127.0.0.1 inside Docker, which prevents host-machine connections)
+
+port: 7880
+bind_addresses:
+    - "0.0.0.0"          # listen on all interfaces — required for Docker port-forwarding to work
+
+rtc:
+    tcp_port: 7881
+    port_range_start: 7882
+    port_range_end: 7900
+    use_external_ip: false
+    # Force the IP advertised in WebRTC ICE candidates to 127.0.0.1
+    # Without this, LiveKit advertises its Docker-internal IP (172.18.0.x),
+    # which the browser on the host machine cannot reach.
+    # With 127.0.0.1, the browser connects via Docker's port-forwarding rules.
+    node_ip: "127.0.0.1"
+
+keys:
+    devkey: secret       # matches LIVEKIT_API_KEY / LIVEKIT_API_SECRET in .env
+
+development: true        # enables dev-mode features (open CORS, etc.)
+
+logging:
+    level: info
