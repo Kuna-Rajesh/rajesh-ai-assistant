@@ -193,27 +193,33 @@ async def entrypoint(ctx: JobContext) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Prewarm & Entry point
+# Embedded Token Server & Entry point
 # ---------------------------------------------------------------------------
-def prewarm(proc: JobProcess) -> None:
+import threading
+
+def start_embedded_token_server() -> None:
     port = os.environ.get("PORT")
-    if port:
+    if not port:
+        return
+
+    def _run() -> None:
         import uvicorn
         try:
             from token_server import app as token_app
         except ModuleNotFoundError:
             from agent.token_server import app as token_app
-        logger.info(f"Starting embedded token server on port {port}...")
-        config = uvicorn.Config(token_app, host="0.0.0.0", port=int(port), log_level="info")
-        server = uvicorn.Server(config)
-        asyncio.create_task(server.serve())
+        logger.info(f"Starting embedded token server thread on port {port}...")
+        uvicorn.run(token_app, host="0.0.0.0", port=int(port), log_level="info")
+
+    t = threading.Thread(target=_run, daemon=True, name="embedded_token_server")
+    t.start()
 
 
 if __name__ == "__main__":
+    start_embedded_token_server()
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
-            prewarm_fnc=prewarm,
             agent_name="rajesh-agent",
             num_idle_processes=0,
             job_executor_type=JobExecutorType.THREAD,

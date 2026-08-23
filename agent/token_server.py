@@ -60,59 +60,56 @@ async def get_token(
     Mint a LiveKit room-join JWT.
     The greeting is embedded in the room's metadata so the agent can
     deliver the correct time-of-day opener without needing clock access.
+    Each participant gets their own isolated private room.
     """
     if not LIVEKIT_API_KEY or not LIVEKIT_API_SECRET:
         raise HTTPException(status_code=500, detail="Server credentials not configured")
 
     import json
+    import uuid
+
+    # Ensure identity is unique if default was passed
+    if identity == "visitor":
+        identity = f"visitor-{uuid.uuid4().hex[:6]}"
+
+    # Each participant gets a unique room name for total privacy and isolation
+    room_name = f"room-{identity}"
     room_metadata = json.dumps({"greeting": greeting})
 
     # Dispatch agent worker to room if not already active (thread-safe with cooldown)
     async with dispatch_lock:
         now = time.time()
-        if now - last_dispatch_time.get(ROOM_NAME, 0) > 10:
+        if now - last_dispatch_time.get(room_name, 0) > 10:
             try:
                 from livekit.api import LiveKitAPI
                 from livekit.protocol import agent_dispatch, room as proto_room
                 async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as api:
-                    # 1. Ensure room exists on LiveKit Cloud
+                    # 1. Ensure unique room exists on LiveKit Cloud
                     try:
-                        await api.room.create_room(proto_room.CreateRoomRequest(name=ROOM_NAME, empty_timeout=300))
+                        await api.room.create_room(proto_room.CreateRoomRequest(name=room_name, empty_timeout=300))
                     except Exception as ex:
                         logger.debug(f"Room create notice: {ex}")
 
                     # 2. Update room metadata with time-of-day greeting
                     try:
-                        await api.room.update_room_metadata(proto_room.UpdateRoomMetadataRequest(room=ROOM_NAME, metadata=room_metadata))
+                        await api.room.update_room_metadata(proto_room.UpdateRoomMetadataRequest(room=room_name, metadata=room_metadata))
                     except Exception as ex:
                         logger.debug(f"Room metadata update notice: {ex}")
 
-                    # 3. Clean up stale agent dispatches
-                    try:
-                        existing = await api.agent_dispatch.list_dispatch(ROOM_NAME)
-                        for d in existing:
-                            try:
-                                await api.agent_dispatch.delete_dispatch(d.id, ROOM_NAME)
-                                logger.info(f"Cleaned up stale agent dispatch {d.id}")
-                            except Exception:
-                                pass
-                    except Exception as ex:
-                        logger.debug(f"List dispatch notice: {ex}")
-
-                    # 4. Create fresh agent dispatch
+                    # 3. Create fresh agent dispatch for this room
                     dispatch = await api.agent_dispatch.create_dispatch(
                         agent_dispatch.CreateAgentDispatchRequest(
                             agent_name="rajesh-agent",
-                            room=ROOM_NAME,
+                            room=room_name,
                             metadata=room_metadata,
                         )
                     )
-                    last_dispatch_time[ROOM_NAME] = now
-                    logger.info(f"Successfully created agent dispatch {dispatch.id} for room {ROOM_NAME}")
+                    last_dispatch_time[room_name] = now
+                    logger.info(f"Successfully created agent dispatch {dispatch.id} for room {room_name}")
             except Exception as e:
                 logger.warning(f"Agent dispatch notice: {e}")
         else:
-            logger.info(f"Skipped duplicate agent dispatch request within cooldown for room {ROOM_NAME}")
+            logger.info(f"Skipped duplicate agent dispatch request within cooldown for room {room_name}")
 
     token = (
         AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
@@ -121,8 +118,7 @@ async def get_token(
         .with_grants(
             VideoGrants(
                 room_join=True,
-                room=ROOM_NAME,
-                # Allow frontend to set room metadata on join
+                room=room_name,
                 room_admin=False,
                 can_publish=True,
                 can_subscribe=True,
@@ -133,7 +129,7 @@ async def get_token(
         .to_jwt()
     )
 
-    return {"token": token, "url": LIVEKIT_URL, "room": ROOM_NAME, "greeting": greeting}
+    return {"token": token, "url": LIVEKIT_URL, "room": room_name, "greeting": greeting}
 
 
 @app.get("/health")
