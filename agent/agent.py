@@ -15,10 +15,18 @@ os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
+import sys
 import asyncio
 import json
 import logging
 from pathlib import Path
+
+_agent_dir = Path(__file__).parent
+_root_dir = _agent_dir.parent
+if str(_agent_dir) not in sys.path:
+    sys.path.insert(0, str(_agent_dir))
+if str(_root_dir) not in sys.path:
+    sys.path.insert(0, str(_root_dir))
 
 logger = logging.getLogger("rajesh-agent")
 
@@ -191,7 +199,10 @@ def prewarm(proc: JobProcess) -> None:
     port = os.environ.get("PORT")
     if port:
         import uvicorn
-        from agent.token_server import app as token_app
+        try:
+            from token_server import app as token_app
+        except ModuleNotFoundError:
+            from agent.token_server import app as token_app
         logger.info(f"Starting embedded token server on port {port}...")
         config = uvicorn.Config(token_app, host="0.0.0.0", port=int(port), log_level="info")
         server = uvicorn.Server(config)

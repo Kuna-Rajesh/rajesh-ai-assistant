@@ -172,8 +172,22 @@ export function useLiveKitRoom(): UseLiveKitRoomReturn {
           return;
         }
 
-        // Enable microphone after connecting
-        await room.localParticipant.setMicrophoneEnabled(true);
+        // Try unlocking audio context for mobile browsers
+        try {
+          await room.startAudio();
+        } catch {
+          // Audio playback will unlock on user's first tap
+        }
+
+        // Try enabling microphone gracefully (mobile browsers may require explicit tap)
+        try {
+          await room.localParticipant.setMicrophoneEnabled(true);
+          setIsMuted(false);
+        } catch (micErr) {
+          console.warn('Microphone auto-enable restricted by browser policy:', micErr);
+          setIsMuted(true);
+          // Keep room connected so user can hear agent and interact via text or tap mic
+        }
 
       } catch (err) {
         if (!cancelled) {
@@ -195,12 +209,22 @@ export function useLiveKitRoom(): UseLiveKitRoomReturn {
   // -------------------------------------------------------------------------
   // Controls
   // -------------------------------------------------------------------------
-  const toggleMute = useCallback(() => {
-    const lp: LocalParticipant | undefined = roomRef.current?.localParticipant;
+  const toggleMute = useCallback(async () => {
+    const room = roomRef.current;
+    const lp = room?.localParticipant;
     if (!lp) return;
-    const next = !isMuted;
-    lp.setMicrophoneEnabled(!next);
-    setIsMuted(next);
+
+    try {
+      await room.startAudio();
+    } catch {}
+
+    const nextMuted = !isMuted;
+    try {
+      await lp.setMicrophoneEnabled(!nextMuted);
+      setIsMuted(nextMuted);
+    } catch (err) {
+      console.error('Failed to toggle microphone:', err);
+    }
   }, [isMuted]);
 
   const disconnect = useCallback(() => {
