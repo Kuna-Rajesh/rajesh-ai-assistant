@@ -141,10 +141,7 @@ async def entrypoint(ctx: JobContext) -> None:
             api_key=GROQ_API_KEY,
             model=GROQ_MODEL,
         ),
-        tts=cartesia.TTS(
-            model="sonic-3",
-            voice="248be419-c632-4f23-adf1-5324ed7dbf1d",  # "Barbershop Man" – warm male voice
-        ),
+        tts=deepgram.TTS(model="aura-helios-en"),
         vad=silero.VAD.load(),
         conn_options=SessionConnectOptions(
             llm_conn_options=APIConnectOptions(timeout=120.0, max_retry=3),
