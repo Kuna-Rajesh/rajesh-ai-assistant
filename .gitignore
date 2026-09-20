@@ -21,6 +21,7 @@ frontend/dist/
 dist/
 .next/
 .out/
+demo/
 
 # IDE & OS
 .vscode/
