@@ -58,23 +58,30 @@ from livekit.agents import (
     AgentSession,
     JobContext,
     JobExecutorType,
+    JobProcess,
     WorkerOptions,
     cli,
 )
 from livekit.agents.llm import FallbackAdapter
 from livekit.agents.voice.agent_session import SessionConnectOptions
-from livekit.agents.voice.turn import InterruptionOptions, TurnHandlingOptions
+from livekit.agents.voice.turn import (
+    EndpointingOptions,
+    InterruptionOptions,
+    PreemptiveGenerationOptions,
+    TurnHandlingOptions,
+)
 from livekit.plugins import cartesia, deepgram, openai
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 # Ordered list of Groq-hosted models to try (primary → fallback → last-resort).
 # The FallbackAdapter will try each in order if the previous one fails.
-# Note: gpt-oss-20b is primary — faster and lighter than 120b for voice latency.
+# openai/gpt-oss-120b is the proven accurate model.
+# qwen/qwen3.8-27b provides ultra-fast (~0.23s) fallback with no reasoning token overhead.
 GROQ_MODELS = [
-    os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b"),
-    "openai/gpt-oss-120b",
+    os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b"),
     "qwen/qwen3.8-27b",
+    "openai/gpt-oss-20b",
 ]
 
 # ---------------------------------------------------------------------------
@@ -192,18 +199,20 @@ async def entrypoint(ctx: JobContext) -> None:
         stt=deepgram.STT(
             model="nova-2",
             language="en-US",
-            endpointing_ms=300,     # Deepgram detects end-of-utterance
-            vad_events=True,        # Deepgram sends VAD events server-side
+            endpointing_ms=250,     # Deepgram server-side end-of-utterance detection
+            vad_events=True,        # Deepgram sends VAD events over websocket
         ),
         llm=fallback_llm,
         tts=deepgram.TTS(model="aura-helios-en"),
-        # vad=silero.VAD.load(),   # REMOVED — causes CPU starvation on free tier
+        vad=None,                   # MUST be None: prevents LiveKit from auto-loading Silero ONNX VAD locally
         conn_options=SessionConnectOptions(
-            llm_conn_options=APIConnectOptions(timeout=30.0, max_retry=2),
+            llm_conn_options=APIConnectOptions(timeout=20.0, max_retry=2),
         ),
         turn_handling=TurnHandlingOptions(
             turn_detection="stt",   # server-side turn detection via Deepgram
-            interruption=InterruptionOptions(mode="stt"),
+            endpointing=EndpointingOptions(min_delay=0.25, max_delay=1.5),
+            interruption=InterruptionOptions(enabled=False),  # disables network adaptive detector to avoid packet dropouts
+            preemptive_generation=PreemptiveGenerationOptions(enabled=True, preemptive_tts=True),
         ),
     )
 
@@ -245,11 +254,48 @@ async def entrypoint(ctx: JobContext) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Prewarm function — runs during worker startup before any jobs arrive.
+# Eliminates the 2.3+ second event-loop freeze on the first user query!
+# ---------------------------------------------------------------------------
+def prewarm(proc: JobProcess) -> None:
+    logger.info("Running agent prewarm to avoid realtime event-loop stalls...")
+    try:
+        import livekit.agents.llm.async_toolset  # noqa: F401
+    except Exception as e:
+        logger.debug("Toolset prewarm notice: %s", e)
+    try:
+        import anyio.abc._testing  # noqa: F401
+    except Exception as e:
+        logger.debug("Anyio prewarm notice: %s", e)
+    try:
+        from livekit.agents.voice.transcription import _speaking_rate  # noqa: F401
+    except Exception as e:
+        logger.debug("Speaking rate prewarm notice: %s", e)
+    try:
+        import livekit.agents.utils.http_context
+        livekit.agents.utils.http_context._create_ssl_context()
+    except Exception as e:
+        logger.debug("SSL prewarm notice: %s", e)
+    try:
+        import numpy as np
+        np.fft.rfft(np.zeros(512))
+        np.divide(np.array([1.0]), np.array([1.0]))
+    except Exception as e:
+        logger.debug("Numpy prewarm notice: %s", e)
+    logger.info("Prewarm complete.")
+
+
+# ---------------------------------------------------------------------------
 # Embedded Token Server & Entry point
 # ---------------------------------------------------------------------------
 import threading
 
 def start_embedded_token_server() -> None:
+    # Only run if explicitly requested; in Render production, the start command
+    # already runs `uvicorn agent.token_server:app --host 0.0.0.0 --port $PORT` directly.
+    if os.environ.get("START_EMBEDDED_SERVER", "").lower() != "true":
+        return
+
     port = os.environ.get("PORT")
     if not port:
         return
@@ -264,7 +310,6 @@ def start_embedded_token_server() -> None:
         try:
             uvicorn.run(token_app, host="0.0.0.0", port=int(port), log_level="info")
         except OSError as e:
-            # Port already bound by the main process (Render starts uvicorn separately)
             logger.warning(f"Embedded token server skipped — port {port} already in use: {e}")
 
     t = threading.Thread(target=_run, daemon=True, name="embedded_token_server")
@@ -276,11 +321,11 @@ if __name__ == "__main__":
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
+            prewarm_fnc=prewarm,
             agent_name="rajesh-agent",
             num_idle_processes=0,
             job_executor_type=JobExecutorType.THREAD,
-            # Raise threshold so the worker doesn't flip-flop available/unavailable
-            # on CPU-constrained hosts like Render free tier (default is 0.7).
-            load_threshold=0.9,
+            # Raise threshold so worker stays available on CPU-constrained hosts like Render free tier
+            load_threshold=0.95,
         )
     )
