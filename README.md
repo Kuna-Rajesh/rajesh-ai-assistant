@@ -13,7 +13,7 @@ experience, skills, and projects.
 | Real-time transport | LiveKit Cloud (`wss://...livekit.cloud`) |
 | Frontend | React + Vite + TypeScript + `livekit-client` |
 | STT | Deepgram Nova-2 |
-| LLM | Groq API (`groq/compound-mini` — ultra-fast low-latency responses) |
+| LLM | Groq API with auto-fallback (`openai/gpt-oss-120b` → `openai/gpt-oss-20b` → `qwen/qwen3.8-27b`) |
 | TTS | Cartesia Sonic-3 |
 | Token server | FastAPI (Python, same venv as agent) |
 

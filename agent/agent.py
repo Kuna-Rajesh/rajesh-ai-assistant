@@ -45,12 +45,20 @@ from livekit.agents import (
     WorkerOptions,
     cli,
 )
+from livekit.agents.llm import FallbackAdapter
 from livekit.agents.voice.agent_session import SessionConnectOptions
 from livekit.agents.voice.turn import InterruptionOptions, TurnHandlingOptions
 from livekit.plugins import cartesia, deepgram, openai, silero
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "groq/compound-mini")
+
+# Ordered list of Groq-hosted models to try (primary → fallback → last-resort).
+# The FallbackAdapter will try each in order if the previous one fails.
+GROQ_MODELS = [
+    os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b"),
+    "openai/gpt-oss-20b",
+    "qwen/qwen3.8-27b",
+]
 
 # ---------------------------------------------------------------------------
 # Resume grounding — load the single source of truth at startup
@@ -134,13 +142,29 @@ async def entrypoint(ctx: JobContext) -> None:
     # ------------------------------------------------------------------
     # Build the agent session (STT → LLM → TTS pipeline)
     # ------------------------------------------------------------------
-    session = AgentSession(
-        stt=deepgram.STT(model="nova-2", language="en-US"),
-        llm=openai.LLM(
+
+    # Create an LLM instance for each Groq model, then wrap them in
+    # FallbackAdapter so rate-limit / outage on one auto-switches to the next.
+    groq_llms = [
+        openai.LLM(
             base_url="https://api.groq.com/openai/v1",
             api_key=GROQ_API_KEY,
-            model=GROQ_MODEL,
-        ),
+            model=model_name,
+        )
+        for model_name in dict.fromkeys(GROQ_MODELS)  # dedup, preserving order
+    ]
+    logger.info("LLM fallback chain: %s", [l.model for l in groq_llms])
+
+    fallback_llm = FallbackAdapter(
+        groq_llms,
+        attempt_timeout=10.0,   # seconds before trying next model
+        max_retry_per_llm=1,    # one retry per model, then move on
+        retry_interval=0.5,
+    )
+
+    session = AgentSession(
+        stt=deepgram.STT(model="nova-2", language="en-US"),
+        llm=fallback_llm,
         tts=deepgram.TTS(model="aura-helios-en"),
         vad=silero.VAD.load(),
         conn_options=SessionConnectOptions(
