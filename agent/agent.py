@@ -51,6 +51,10 @@ from dotenv import load_dotenv
 # Load .env from the project root (one level above /agent)
 load_dotenv(Path(__file__).parent.parent / ".env")
 
+import certifi
+import httpx
+import openai as openai_api
+
 from livekit import rtc
 from livekit.agents import (
     APIConnectOptions,
@@ -64,13 +68,14 @@ from livekit.agents import (
 )
 from livekit.agents.llm import FallbackAdapter
 from livekit.agents.voice.agent_session import SessionConnectOptions
+from livekit.agents.voice.room_io import RoomOutputOptions
 from livekit.agents.voice.turn import (
     EndpointingOptions,
     InterruptionOptions,
     PreemptiveGenerationOptions,
     TurnHandlingOptions,
 )
-from livekit.plugins import cartesia, deepgram, openai
+from livekit.plugins import deepgram, openai
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
@@ -83,6 +88,36 @@ GROQ_MODELS = [
     "qwen/qwen3.8-27b",
     "openai/gpt-oss-20b",
 ]
+
+# Shared HTTP client with pre-cached SSL context (prevents 1.7s event-loop stalls during active calls)
+_ssl_context = ssl.create_default_context(cafile=certifi.where())
+
+_shared_http_client = httpx.AsyncClient(
+    verify=_ssl_context,
+    timeout=httpx.Timeout(connect=5.0, read=20.0, write=5.0, pool=10.0),
+    limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
+)
+
+_shared_openai_client = openai_api.AsyncClient(
+    base_url="https://api.groq.com/openai/v1",
+    api_key=GROQ_API_KEY,
+    http_client=_shared_http_client,
+)
+
+GROQ_LLMS = [
+    openai.LLM(
+        model=model_name,
+        client=_shared_openai_client,
+    )
+    for model_name in dict.fromkeys(GROQ_MODELS)
+]
+
+FALLBACK_LLM = FallbackAdapter(
+    GROQ_LLMS,
+    attempt_timeout=10.0,
+    max_retry_per_llm=1,
+    retry_interval=0.5,
+)
 
 # ---------------------------------------------------------------------------
 # Resume grounding — load the single source of truth at startup
@@ -167,25 +202,6 @@ async def entrypoint(ctx: JobContext) -> None:
     # Build the agent session (STT → LLM → TTS pipeline)
     # ------------------------------------------------------------------
 
-    # Create an LLM instance for each Groq model, then wrap them in
-    # FallbackAdapter so rate-limit / outage on one auto-switches to the next.
-    groq_llms = [
-        openai.LLM(
-            base_url="https://api.groq.com/openai/v1",
-            api_key=GROQ_API_KEY,
-            model=model_name,
-        )
-        for model_name in dict.fromkeys(GROQ_MODELS)  # dedup, preserving order
-    ]
-    logger.info("LLM fallback chain: %s", [l.model for l in groq_llms])
-
-    fallback_llm = FallbackAdapter(
-        groq_llms,
-        attempt_timeout=10.0,   # seconds before trying next model
-        max_retry_per_llm=1,    # one retry per model, then move on
-        retry_interval=0.5,
-    )
-
     # ── No local VAD ──────────────────────────────────────────────────
     # Silero VAD runs an ONNX model on every audio frame. On Render free
     # tier (~0.1 CPU) it can't keep up with realtime audio, causing the
@@ -202,7 +218,7 @@ async def entrypoint(ctx: JobContext) -> None:
             endpointing_ms=250,     # Deepgram server-side end-of-utterance detection
             vad_events=True,        # Deepgram sends VAD events over websocket
         ),
-        llm=fallback_llm,
+        llm=FALLBACK_LLM,           # Pre-warmed shared LLM adapter (zero instantiation latency)
         tts=deepgram.TTS(model="aura-helios-en"),
         vad=None,                   # MUST be None: prevents LiveKit from auto-loading Silero ONNX VAD locally
         conn_options=SessionConnectOptions(
@@ -250,6 +266,9 @@ async def entrypoint(ctx: JobContext) -> None:
     await session.start(
         agent=ResumeAgent(opener=opener),
         room=ctx.room,
+        room_output_options=RoomOutputOptions(
+            sync_transcription=False,  # CRITICAL: Disables TranscriptSynchronizer & SpeakingRateDetector STFT/FFT on event loop
+        ),
     )
 
 
@@ -264,9 +283,17 @@ def prewarm(proc: JobProcess) -> None:
     except Exception as e:
         logger.debug("Toolset prewarm notice: %s", e)
     try:
-        import anyio.abc._testing  # noqa: F401
+        import anyio
+        import anyio.abc._testing                # noqa: F401
+        import anyio._core._sockets             # noqa: F401
+        import anyio._backends._asyncio         # noqa: F401
     except Exception as e:
         logger.debug("Anyio prewarm notice: %s", e)
+    try:
+        from livekit.agents.tokenize import basic
+        basic.hyphenate_word("prewarm")
+    except Exception as e:
+        logger.debug("Hyphenate prewarm notice: %s", e)
     try:
         from livekit.agents.voice.transcription import _speaking_rate  # noqa: F401
     except Exception as e:
@@ -323,7 +350,7 @@ if __name__ == "__main__":
             entrypoint_fnc=entrypoint,
             prewarm_fnc=prewarm,
             agent_name="rajesh-agent",
-            num_idle_processes=0,
+            num_idle_processes=1,
             job_executor_type=JobExecutorType.THREAD,
             # Raise threshold so worker stays available on CPU-constrained hosts like Render free tier
             load_threshold=0.95,
