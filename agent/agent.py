@@ -19,7 +19,23 @@ import sys
 import asyncio
 import json
 import logging
+import ssl                      # pre-import: avoids 578ms event-loop block
 from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Pre-warm heavy imports that would otherwise block the async event loop
+# on first use (numpy FFT, ssl certs, etc.)
+# ---------------------------------------------------------------------------
+try:
+    import numpy as np           # pre-import: avoids 277ms block on first FFT
+    np.fft.rfft(np.zeros(512))   # trigger lazy sub-module load
+except ImportError:
+    pass
+
+try:
+    ssl.create_default_context()  # pre-load system trust store
+except Exception:
+    pass
 
 _agent_dir = Path(__file__).parent
 _root_dir = _agent_dir.parent
@@ -48,15 +64,16 @@ from livekit.agents import (
 from livekit.agents.llm import FallbackAdapter
 from livekit.agents.voice.agent_session import SessionConnectOptions
 from livekit.agents.voice.turn import InterruptionOptions, TurnHandlingOptions
-from livekit.plugins import cartesia, deepgram, openai, silero
+from livekit.plugins import cartesia, deepgram, openai
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 # Ordered list of Groq-hosted models to try (primary → fallback → last-resort).
 # The FallbackAdapter will try each in order if the previous one fails.
+# Note: gpt-oss-20b is primary — faster and lighter than 120b for voice latency.
 GROQ_MODELS = [
-    os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b"),
-    "openai/gpt-oss-20b",
+    os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b"),
+    "openai/gpt-oss-120b",
     "qwen/qwen3.8-27b",
 ]
 
@@ -162,17 +179,31 @@ async def entrypoint(ctx: JobContext) -> None:
         retry_interval=0.5,
     )
 
+    # ── No local VAD ──────────────────────────────────────────────────
+    # Silero VAD runs an ONNX model on every audio frame. On Render free
+    # tier (~0.1 CPU) it can't keep up with realtime audio, causing the
+    # delay to snowball (0.18s → 14.87s in logs) and audio to break.
+    #
+    # Instead we use turn_detection="stt" which delegates end-of-speech
+    # detection to Deepgram's server-side endpointing — zero local CPU.
+    # ──────────────────────────────────────────────────────────────────
+
     session = AgentSession(
-        stt=deepgram.STT(model="nova-2", language="en-US"),
+        stt=deepgram.STT(
+            model="nova-2",
+            language="en-US",
+            endpointing_ms=300,     # Deepgram detects end-of-utterance
+            vad_events=True,        # Deepgram sends VAD events server-side
+        ),
         llm=fallback_llm,
         tts=deepgram.TTS(model="aura-helios-en"),
-        vad=silero.VAD.load(),
+        # vad=silero.VAD.load(),   # REMOVED — causes CPU starvation on free tier
         conn_options=SessionConnectOptions(
-            llm_conn_options=APIConnectOptions(timeout=120.0, max_retry=3),
+            llm_conn_options=APIConnectOptions(timeout=30.0, max_retry=2),
         ),
         turn_handling=TurnHandlingOptions(
-            turn_detection="vad",
-            interruption=InterruptionOptions(mode="vad"),
+            turn_detection="stt",   # server-side turn detection via Deepgram
+            interruption=InterruptionOptions(mode="stt"),
         ),
     )
 
@@ -230,7 +261,11 @@ def start_embedded_token_server() -> None:
         except ModuleNotFoundError:
             from agent.token_server import app as token_app
         logger.info(f"Starting embedded token server thread on port {port}...")
-        uvicorn.run(token_app, host="0.0.0.0", port=int(port), log_level="info")
+        try:
+            uvicorn.run(token_app, host="0.0.0.0", port=int(port), log_level="info")
+        except OSError as e:
+            # Port already bound by the main process (Render starts uvicorn separately)
+            logger.warning(f"Embedded token server skipped — port {port} already in use: {e}")
 
     t = threading.Thread(target=_run, daemon=True, name="embedded_token_server")
     t.start()
@@ -244,5 +279,8 @@ if __name__ == "__main__":
             agent_name="rajesh-agent",
             num_idle_processes=0,
             job_executor_type=JobExecutorType.THREAD,
+            # Raise threshold so the worker doesn't flip-flop available/unavailable
+            # on CPU-constrained hosts like Render free tier (default is 0.7).
+            load_threshold=0.9,
         )
     )
