@@ -4,10 +4,28 @@ export interface TranscriptEntry {
   id: string;
   speaker: 'agent' | 'user';
   text: string;
+  timestamp: number;  // epoch ms — set when entry is created
 }
 
 interface CaptionsStripProps {
   entries: TranscriptEntry[];
+}
+
+/** Format timestamp as "Sep 27, 2026 · 3:45:12 PM" */
+function formatTimestamp(ts: number): string {
+  const d = new Date(ts);
+  const date = d.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+  const time = d.toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+  });
+  return `${date} · ${time}`;
 }
 
 const CaptionsStrip: React.FC<CaptionsStripProps> = ({ entries }) => {
@@ -45,9 +63,14 @@ const CaptionsStrip: React.FC<CaptionsStripProps> = ({ entries }) => {
             className={`caption-item ${entry.speaker}`}
             aria-label={`${entry.speaker === 'agent' ? 'Raj' : 'You'}: ${entry.text}`}
           >
-            <span className="caption-label">
-              {entry.speaker === 'agent' ? 'Raj' : 'You'}
-            </span>
+            <div className="caption-header">
+              <span className="caption-label">
+                {entry.speaker === 'agent' ? 'Raj' : 'You'}
+              </span>
+              <span className="caption-time">
+                {formatTimestamp(entry.timestamp)}
+              </span>
+            </div>
             <span className="caption-text">{entry.text}</span>
           </div>
         ))}

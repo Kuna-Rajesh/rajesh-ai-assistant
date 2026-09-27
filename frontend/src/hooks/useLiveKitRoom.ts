@@ -64,13 +64,28 @@ export function useLiveKitRoom(): UseLiveKitRoomReturn {
   // Transcript helpers
   // -------------------------------------------------------------------------
   const addEntry = useCallback((speaker: 'agent' | 'user', text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
     setTranscript((prev) => {
-      // Merge with last entry of same speaker if it came in rapidly (streaming chunks)
+      const now = Date.now();
       const last = prev[prev.length - 1];
-      if (last && last.speaker === speaker && Date.now() - Number(last.id.split('-')[1]) < 1500) {
-        return [...prev.slice(0, -1), { ...last, text: last.text + ' ' + text }];
+      if (last && last.speaker === speaker) {
+        const lastTrimmed = last.text.trim();
+        // Exact duplicate or already fully contained in previous message
+        if (lastTrimmed === trimmed || lastTrimmed.endsWith(trimmed) || lastTrimmed.includes(trimmed)) {
+          return prev;
+        }
+        // Streaming partial continuation where incoming is a fuller prefix
+        if (trimmed.startsWith(lastTrimmed)) {
+          return [...prev.slice(0, -1), { ...last, text: trimmed, timestamp: now }];
+        }
+        // Merge rapid streaming chunks within 1500ms
+        if (now - last.timestamp < 1500) {
+          return [...prev.slice(0, -1), { ...last, text: last.text + ' ' + trimmed }];
+        }
       }
-      return [...prev, { id: uid(), speaker, text }];
+      return [...prev, { id: uid(), speaker, text: trimmed, timestamp: now }];
     });
   }, []);
 

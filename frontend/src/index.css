@@ -384,6 +384,12 @@ html, body, #root {
   max-width: 95%;
 }
 
+.caption-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .caption-label {
   font-size: 10px;
   font-weight: 700;
@@ -393,6 +399,14 @@ html, body, #root {
 }
 .caption-item.agent .caption-label { color: var(--caption-agent); }
 .caption-item.user .caption-label  { color: var(--caption-user); }
+
+.caption-time {
+  font-size: 9px;
+  font-weight: 400;
+  color: var(--text-dim);
+  opacity: 0.45;
+  white-space: nowrap;
+}
 
 .caption-text {
   font-size: 13.5px;
